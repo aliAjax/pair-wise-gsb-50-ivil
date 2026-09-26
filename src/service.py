@@ -2,16 +2,18 @@
 from typing import Any, Dict, List, Optional
 
 from .audit import AuditRecorder
-from .domain import Actor, PermissionDenied, text
+from .domain import Actor, PermissionDenied, ValidationError, number, text
+from .payments import PaymentRules
 from .repository import Repository
 from .rules import DomainRules
 
 
 class Service:
-    def __init__(self, repository: Repository, rules: DomainRules, audit: AuditRecorder = None) -> None:
+    def __init__(self, repository: Repository, rules: DomainRules, audit: AuditRecorder = None, payment_rules: PaymentRules = None) -> None:
         self.repository = repository
         self.rules = rules
         self.audit = audit or AuditRecorder(repository)
+        self.payment_rules = payment_rules or PaymentRules()
 
     @staticmethod
     def _actor(actor: Actor) -> Actor:
@@ -41,7 +43,63 @@ class Service:
     def get_record(self, actor: Actor, record_id: int) -> Dict[str, Any]:
         actor = self._actor(actor)
         self._ensure_known_role(actor)
-        return self.repository.get(record_id)
+        return self._with_plan(self.repository.get(record_id))
+
+    def _with_plan(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        plan = self.repository.get_plan(record["id"])
+        if plan is not None:
+            record["payment_plan"] = plan
+        return record
+
+    @staticmethod
+    def _data(data: Any) -> Dict[str, Any]:
+        if data is None:
+            return {}
+        if not isinstance(data, dict):
+            raise ValidationError("data必须是对象")
+        return data
+
+    def schedule(self, actor: Actor, record_id: int, expected_version: int, data: Dict[str, Any]) -> Dict[str, Any]:
+        actor = self._actor(actor)
+        self._ensure_known_role(actor)
+        if not self.payment_rules.can_schedule(actor.role):
+            raise PermissionDenied("角色无权制定缴款计划")
+        record = self.repository.get(record_id)
+        self.payment_rules.require_schedule_state(record)
+        bill = round(float(record["payload"].get("total_due", 0.0)), 2)
+        if bill <= 0:
+            raise ValidationError("应缴账单金额为零，无需制定缴款计划")
+        installments = self.payment_rules.validate_installments(bill, self._data(data).get("installments"))
+        record = self.repository.create_plan(
+            record_id=record_id,
+            expected_version=int(expected_version),
+            bill_amount=bill,
+            installments=installments,
+            actor_id=actor.user_id,
+            details={"summary": "复核金额已冻结为应缴账单并制定分期计划", "bill_amount": bill, "installments": installments},
+        )
+        return self._with_plan(record)
+
+    def pay(self, actor: Actor, record_id: int, expected_version: int, data: Dict[str, Any]) -> Dict[str, Any]:
+        actor = self._actor(actor)
+        self._ensure_known_role(actor)
+        if not self.payment_rules.can_pay(actor.role):
+            raise PermissionDenied("角色无权登记付款")
+        record = self.repository.get(record_id)
+        self.payment_rules.require_pay_state(record)
+        amount = round(number(self._data(data), "amount"), 2)
+        if amount <= 0:
+            raise ValidationError("amount必须大于0")
+        record, payment = self.repository.apply_payment(
+            record_id=record_id,
+            expected_version=int(expected_version),
+            amount=amount,
+            actor_id=actor.user_id,
+            apply_fn=self.payment_rules.apply_payment,
+        )
+        result = self._with_plan(record)
+        result["payment"] = payment
+        return result
 
     def act(self, actor: Actor, record_id: int, expected_version: int, action: str, data: Dict[str, Any]) -> Dict[str, Any]:
         actor = self._actor(actor)

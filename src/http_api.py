@@ -12,6 +12,8 @@ from .domain import Actor, DomainError, PermissionDenied, ValidationError
 RECORD_RE = re.compile(r"^/api/records/(\d+)$")
 ACTION_RE = re.compile(r"^/api/records/(\d+)/actions/([a-z_]+)$")
 AUDIT_RE = re.compile(r"^/api/records/(\d+)/audit$")
+SCHEDULE_RE = re.compile(r"^/api/records/(\d+)/schedule$")
+PAYMENT_RE = re.compile(r"^/api/records/(\d+)/payments$")
 
 
 def make_handler(service: Any, static_dir: Path):
@@ -91,6 +93,13 @@ def make_handler(service: Any, static_dir: Path):
             except Exception as exc:
                 self._handle_error(exc)
 
+        @staticmethod
+        def _expected_version(body: Dict[str, Any]) -> int:
+            version = body.get("expected_version")
+            if not isinstance(version, int):
+                raise ValidationError("expected_version必须是整数")
+            return version
+
         def do_POST(self) -> None:
             try:
                 parsed = urlparse(self.path)
@@ -101,10 +110,17 @@ def make_handler(service: Any, static_dir: Path):
                     return
                 match = ACTION_RE.match(parsed.path)
                 if match:
-                    version = body.get("expected_version")
-                    if not isinstance(version, int):
-                        raise ValidationError("expected_version必须是整数")
-                    record = service.act(self._actor(), int(match.group(1)), version, match.group(2), body.get("data", {}))
+                    record = service.act(self._actor(), int(match.group(1)), self._expected_version(body), match.group(2), body.get("data", {}))
+                    self._send(200, record)
+                    return
+                match = SCHEDULE_RE.match(parsed.path)
+                if match:
+                    record = service.schedule(self._actor(), int(match.group(1)), self._expected_version(body), body.get("data", {}))
+                    self._send(201, record)
+                    return
+                match = PAYMENT_RE.match(parsed.path)
+                if match:
+                    record = service.pay(self._actor(), int(match.group(1)), self._expected_version(body), body.get("data", {}))
                     self._send(200, record)
                     return
                 self._send(404, {"error": "not_found", "message": "路径不存在"})

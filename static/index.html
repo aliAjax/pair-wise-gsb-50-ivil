@@ -8,8 +8,15 @@
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #17212b; }
     main { max-width: 960px; margin: auto; }
     button { padding: .55rem .9rem; cursor: pointer; }
+    input, textarea { padding: .45rem; font: inherit; }
     pre { background: #f4f6f8; padding: 1rem; overflow: auto; border-radius: 8px; }
-    .row { display: flex; gap: 1rem; align-items: center; }
+    .row { display: flex; gap: 1rem; align-items: center; margin: .5rem 0; }
+    table { border-collapse: collapse; margin: .5rem 0 1rem; }
+    th, td { border: 1px solid #d4dbe3; padding: .4rem .7rem; text-align: right; }
+    th:first-child, td:first-child { text-align: center; }
+    th:nth-child(2), td:nth-child(2) { text-align: left; }
+    h2 { margin-top: 2rem; }
+    #detail { margin-top: 1rem; }
   </style>
 </head>
 <body>
@@ -18,16 +25,115 @@
   <p>最小演示页。完整业务流程通过README中的JSON接口调用。</p>
   <div class="row"><button id="load">加载记录</button><button id="stats">查看状态统计</button></div>
   <pre id="output">点击上方按钮读取服务状态。</pre>
+
+  <h2>案件详情与缴款计划</h2>
+  <div class="row">
+    <input id="record-id" type="number" min="1" placeholder="案件ID">
+    <button id="load-detail">加载详情</button>
+  </div>
+  <div id="detail">加载案件后在此展示复核账单与分期计划。</div>
+
+  <h3>制定缴款计划（复核人员）</h3>
+  <div class="row">
+    <textarea id="installments" rows="3" cols="52" placeholder='[{"amount":1000,"due_date":"2026-10-31"}]'></textarea>
+    <button id="schedule">提交计划</button>
+  </div>
+
+  <h3>登记付款（企业）</h3>
+  <div class="row">
+    <input id="pay-amount" type="number" min="0" step="0.01" placeholder="付款金额">
+    <button id="pay">付款</button>
+  </div>
 </main>
 <script>
 const headers = {"X-User-Id":"demo-admin","X-Role":"admin","X-Org":"demo"};
+const STATUS_LABELS = {"pending":"未缴清","partial":"部分缴清","settled":"已结清","active":"进行中"};
+let current = null;
+
 async function show(path) {
   const response = await fetch(path, {headers});
   const data = await response.json();
   document.getElementById("output").textContent = JSON.stringify(data, null, 2);
 }
+
+function esc(value) {
+  return String(value).replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
+}
+
+function fmt(value) {
+  return Number(value).toFixed(2);
+}
+
+function renderDetail(record) {
+  current = record;
+  let html = "<p>案件 #" + record.id + "（" + esc(record.reference) + "）　状态：" + esc(record.state) + "　版本：" + record.version + "</p>";
+  html += "<p>纳税人：" + esc(record.payload.taxpayer) + "　税期：" + esc(record.payload.tax_period) + "　复核应缴：" + fmt(record.payload.total_due || 0) + "</p>";
+  const plan = record.payment_plan;
+  if (plan) {
+    html += "<h3>缴款计划</h3><p>计划总额：" + fmt(plan.total_amount) + "　已缴：" + fmt(plan.paid_amount) + "　剩余：" + fmt(plan.remaining_amount) + "　状态：" + (STATUS_LABELS[plan.status] || plan.status) + "</p>";
+    html += "<table><thead><tr><th>期次</th><th>到期日</th><th>金额</th><th>已缴</th><th>余额</th><th>结清状态</th></tr></thead><tbody>";
+    for (const item of plan.installments) {
+      html += "<tr><td>" + item.seq + "</td><td>" + esc(item.due_date) + "</td><td>" + fmt(item.amount) + "</td><td>" + fmt(item.paid_amount) + "</td><td>" + fmt(item.balance) + "</td><td>" + (STATUS_LABELS[item.status] || item.status) + "</td></tr>";
+    }
+    html += "</tbody></table>";
+  } else {
+    html += "<p>尚未制定缴款计划。</p>";
+  }
+  document.getElementById("detail").innerHTML = html;
+}
+
+async function post(path, body) {
+  const response = await fetch(path, {method: "POST", headers: Object.assign({"Content-Type": "application/json"}, headers), body: JSON.stringify(body)});
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.message || ("请求失败：" + response.status));
+  }
+  return data;
+}
+
+async function loadDetail() {
+  const id = document.getElementById("record-id").value;
+  if (!id) { alert("请输入案件ID"); return; }
+  try {
+    const response = await fetch("/api/records/" + id, {headers});
+    const data = await response.json();
+    if (!response.ok) { throw new Error(data.message || "加载失败"); }
+    renderDetail(data);
+  } catch (err) { alert(err.message); }
+}
+
+async function submitSchedule() {
+  if (!current) { alert("请先加载案件详情"); return; }
+  let installments;
+  try {
+    installments = JSON.parse(document.getElementById("installments").value);
+  } catch (err) {
+    alert("账期JSON无效");
+    return;
+  }
+  try {
+    const record = await post("/api/records/" + current.id + "/schedule", {expected_version: current.version, data: {installments}});
+    renderDetail(record);
+  } catch (err) { alert(err.message); }
+}
+
+async function submitPayment() {
+  if (!current) { alert("请先加载案件详情"); return; }
+  const amount = Number(document.getElementById("pay-amount").value);
+  try {
+    const record = await post("/api/records/" + current.id + "/payments", {expected_version: current.version, data: {amount}});
+    renderDetail(record);
+    if (record.payment) {
+      document.getElementById("output").textContent = JSON.stringify(record.payment, null, 2);
+    }
+  } catch (err) { alert(err.message); }
+}
+
 document.getElementById("load").onclick = () => show("/api/records?limit=20");
 document.getElementById("stats").onclick = () => show("/api/stats");
+document.getElementById("load-detail").onclick = loadDetail;
+document.getElementById("schedule").onclick = submitSchedule;
+document.getElementById("pay").onclick = submitPayment;
 </script>
 </body>
 </html>
