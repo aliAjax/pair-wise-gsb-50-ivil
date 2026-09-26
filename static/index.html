@@ -8,26 +8,205 @@
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #17212b; }
     main { max-width: 960px; margin: auto; }
     button { padding: .55rem .9rem; cursor: pointer; }
+    input, select { padding: .4rem .5rem; }
     pre { background: #f4f6f8; padding: 1rem; overflow: auto; border-radius: 8px; }
-    .row { display: flex; gap: 1rem; align-items: center; }
+    .row { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
+    table { border-collapse: collapse; width: 100%; margin: .5rem 0 1rem; }
+    th, td { border: 1px solid #d7dee6; padding: .4rem .6rem; text-align: left; font-size: .92rem; }
+    th { background: #eef2f6; }
+    section { border: 1px solid #e1e7ee; border-radius: 8px; padding: 1rem; margin-top: 1rem; }
+    h2 { font-size: 1.05rem; margin: .2rem 0 .6rem; }
+    .muted { color: #5b6b7c; }
+    .settled { color: #1a7f37; font-weight: 600; }
+    .open { color: #b35900; font-weight: 600; }
   </style>
 </head>
 <body>
 <main>
   <h1>税务稽查案件与复议流程</h1>
-  <p>最小演示页。完整业务流程通过README中的JSON接口调用。</p>
-  <div class="row"><button id="load">加载记录</button><button id="stats">查看状态统计</button></div>
+  <div class="row">
+    <label>用户 <input id="user" value="demo-admin"></label>
+    <label>角色
+      <select id="role">
+        <option value="admin">admin</option>
+        <option value="inspector">inspector</option>
+        <option value="reviewer">reviewer</option>
+        <option value="taxpayer_rep">taxpayer_rep</option>
+      </select>
+    </label>
+    <button id="load">加载记录</button>
+    <button id="stats">查看状态统计</button>
+  </div>
+
+  <section>
+    <h2>案件列表</h2>
+    <div id="records" class="muted">点击“加载记录”读取案件。</div>
+  </section>
+
+  <section id="detail" hidden>
+    <h2>案件详情</h2>
+    <div id="detail-body"></div>
+  </section>
+
+  <section id="plan" hidden>
+    <h2>分期缴款计划</h2>
+    <div id="plan-body"></div>
+  </section>
+
+  <section id="plan-form" hidden>
+    <h2>冻结应缴账单（复核人员）</h2>
+    <p class="muted">一次提交各期金额和到期日；各期到期日必须依次靠后，合计须等于复核金额。</p>
+    <table id="plan-rows">
+      <thead><tr><th>期次</th><th>金额</th><th>到期日</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="row">
+      <button id="add-row" type="button">添加一期</button>
+      <button id="submit-plan" type="button">提交分期计划</button>
+    </div>
+  </section>
+
+  <section id="pay-form" hidden>
+    <h2>登记缴款（纳税人代表）</h2>
+    <p class="muted">缴款先冲最早未结清的一期，结清后固定；超出该期余额的多出金额拒绝入账。</p>
+    <div class="row">
+      <label>金额 <input id="pay-amount" type="number" min="0" step="0.01"></label>
+      <button id="submit-pay" type="button">缴款</button>
+    </div>
+  </section>
+
   <pre id="output">点击上方按钮读取服务状态。</pre>
 </main>
 <script>
-const headers = {"X-User-Id":"demo-admin","X-Role":"admin","X-Org":"demo"};
-async function show(path) {
-  const response = await fetch(path, {headers});
-  const data = await response.json();
-  document.getElementById("output").textContent = JSON.stringify(data, null, 2);
+const $ = (id) => document.getElementById(id);
+let current = null;
+
+function headers() {
+  return {
+    "X-User-Id": $("user").value.trim() || "demo-admin",
+    "X-Role": $("role").value,
+    "X-Org": "demo",
+    "Content-Type": "application/json"
+  };
 }
-document.getElementById("load").onclick = () => show("/api/records?limit=20");
-document.getElementById("stats").onclick = () => show("/api/stats");
+async function api(path, options) {
+  const response = await fetch(path, Object.assign({headers: headers()}, options));
+  const data = await response.json();
+  if (!response.ok) {
+    const err = new Error(data.message || response.statusText);
+    err.payload = data;
+    throw err;
+  }
+  return data;
+}
+function show(data) { $("output").textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2); }
+function fail(err) { show(err.payload || String(err)); }
+const money = (v) => Number(v).toFixed(2);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+
+async function loadRecords() {
+  try {
+    const data = await api("/api/records?limit=50");
+    show(data);
+    if (!data.items.length) { $("records").textContent = "暂无记录。"; return; }
+    const rows = data.items.map((r) => {
+      const p = r.payload || {};
+      return `<tr><td>${r.id}</td><td>${esc(r.reference)}</td><td>${esc(p.taxpayer || "")}</td><td>${esc(r.state)}</td><td>${money(p.total_due || 0)}</td><td><button class="view" data-id="${r.id}">查看</button></td></tr>`;
+    }).join("");
+    $("records").innerHTML = `<table><thead><tr><th>ID</th><th>编号</th><th>纳税人</th><th>状态</th><th>应缴合计</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+    document.querySelectorAll(".view").forEach((b) => b.onclick = () => loadDetail(Number(b.dataset.id)));
+  } catch (err) { fail(err); }
+}
+
+async function loadDetail(id) {
+  try {
+    const record = await api("/api/records/" + id);
+    current = record;
+    show(record);
+    renderDetail(record);
+    renderPlan(record);
+  } catch (err) { fail(err); }
+}
+
+function renderDetail(record) {
+  $("detail").hidden = false;
+  const p = record.payload || {};
+  $("detail-body").innerHTML = `<table><tbody>
+    <tr><th>ID</th><td>${record.id}</td><th>编号</th><td>${esc(record.reference)}</td></tr>
+    <tr><th>状态</th><td>${esc(record.state)}</td><th>版本</th><td>${record.version}</td></tr>
+    <tr><th>纳税人</th><td>${esc(p.taxpayer || "")}</td><th>税期</th><td>${esc(p.tax_period || "")}</td></tr>
+    <tr><th>应缴合计</th><td>${money(p.total_due || 0)}</td><th>复核结论</th><td>${esc(p.review_outcome || "—")}</td></tr>
+  </tbody></table>`;
+}
+
+function renderPlan(record) {
+  const plan = record.installment_plan;
+  $("plan").hidden = false;
+  $("plan-form").hidden = !(record.state === "reviewed" && !plan);
+  $("pay-form").hidden = !(plan && plan.status === "active");
+  if (!$("plan-form").hidden) {
+    document.querySelector("#plan-rows tbody").innerHTML = "";
+    addPlanRow();
+    addPlanRow();
+  }
+  if (!plan) {
+    $("plan-body").innerHTML = '<p class="muted">尚未冻结应缴账单。</p>';
+    return;
+  }
+  const rows = plan.installments.map((i) => {
+    const settled = i.status === "settled";
+    return `<tr><td>${i.seq}</td><td>${i.due_date}</td><td>${money(i.amount)}</td><td>${money(i.paid_amount)}</td><td>${money(i.balance)}</td><td class="${settled ? "settled" : "open"}">${settled ? "已结清" : "未结清"}</td></tr>`;
+  }).join("");
+  const payments = plan.payments.length
+    ? `<table><thead><tr><th>#</th><th>期次</th><th>金额</th><th>经办</th><th>时间</th></tr></thead><tbody>${plan.payments.map((p) => `<tr><td>${p.id}</td><td>${p.installment_seq}</td><td>${money(p.amount)}</td><td>${esc(p.actor_id)}</td><td>${esc(p.created_at)}</td></tr>`).join("")}</tbody></table>`
+    : '<p class="muted">暂无缴款记录。</p>';
+  const planSettled = plan.status === "settled";
+  $("plan-body").innerHTML = `
+    <p>计划总额 <b>${money(plan.total_amount)}</b> ｜ 已缴 <b>${money(plan.paid_total)}</b> ｜ 剩余 <b>${money(plan.remaining)}</b> ｜ 状态 <b class="${planSettled ? "settled" : "open"}">${planSettled ? "已结清" : "缴纳中"}</b></p>
+    <table><thead><tr><th>期次</th><th>到期日</th><th>金额</th><th>已缴</th><th>余额</th><th>状态</th></tr></thead><tbody>${rows}</tbody></table>
+    <h2>缴款记录</h2>
+    ${payments}`;
+}
+
+function addPlanRow() {
+  const tbody = document.querySelector("#plan-rows tbody");
+  const tr = document.createElement("tr");
+  tr.innerHTML = `<td class="seq"></td><td><input class="amount" type="number" min="0" step="0.01"></td><td><input class="due" type="date"></td><td><button type="button" class="del">删除</button></td>`;
+  tr.querySelector(".del").onclick = () => { tr.remove(); renumber(); };
+  tbody.appendChild(tr);
+  renumber();
+}
+function renumber() {
+  document.querySelectorAll("#plan-rows tbody .seq").forEach((td, i) => td.textContent = i + 1);
+}
+
+async function submitPlan() {
+  if (!current) return;
+  const installments = Array.from(document.querySelectorAll("#plan-rows tbody tr")).map((tr) => ({
+    amount: Number(tr.querySelector(".amount").value),
+    due_date: tr.querySelector(".due").value
+  }));
+  try {
+    const plan = await api("/api/records/" + current.id + "/plan", {method: "POST", body: JSON.stringify({data: {installments}})});
+    show(plan);
+    await loadDetail(current.id);
+  } catch (err) { fail(err); }
+}
+
+async function submitPay() {
+  if (!current) return;
+  try {
+    const plan = await api("/api/records/" + current.id + "/payments", {method: "POST", body: JSON.stringify({data: {amount: Number($("pay-amount").value)}})});
+    show(plan);
+    await loadDetail(current.id);
+  } catch (err) { fail(err); }
+}
+
+$("load").onclick = loadRecords;
+$("stats").onclick = async () => { try { show(await api("/api/stats")); } catch (err) { fail(err); } };
+$("add-row").onclick = addPlanRow;
+$("submit-plan").onclick = submitPlan;
+$("submit-pay").onclick = submitPay;
 </script>
 </body>
 </html>

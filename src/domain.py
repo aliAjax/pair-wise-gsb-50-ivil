@@ -95,3 +95,8 @@ def text_list(data: Dict[str, Any], key: str, minimum: int = 0) -> List[str]:
     if len(value) < minimum:
         raise ValidationError("%s至少需要%s项" % (key, minimum))
     return [item.strip() for item in value]
+
+
+def cents(value: Any) -> int:
+    """金额换算为分，比较与累加时避免浮点误差。"""
+    return int(round(float(value) * 100))

@@ -2,7 +2,7 @@
 from typing import Any, Dict, List, Optional
 
 from .audit import AuditRecorder
-from .domain import Actor, PermissionDenied, text
+from .domain import Actor, NotFound, PermissionDenied, ValidationError, text
 from .repository import Repository
 from .rules import DomainRules
 
@@ -41,7 +41,41 @@ class Service:
     def get_record(self, actor: Actor, record_id: int) -> Dict[str, Any]:
         actor = self._actor(actor)
         self._ensure_known_role(actor)
-        return self.repository.get(record_id)
+        record = self.repository.get(record_id)
+        record["installment_plan"] = self.repository.get_plan(record_id)
+        return record
+
+    def create_plan(self, actor: Actor, record_id: int, data: Dict[str, Any]) -> Dict[str, Any]:
+        actor = self._actor(actor)
+        self._ensure_known_role(actor)
+        if not self.rules.role_can_plan(actor.role):
+            raise PermissionDenied("角色无权冻结应缴账单")
+        if not isinstance(data, dict):
+            raise ValidationError("data必须是对象")
+        record = self.repository.get(record_id)
+        plan = self.rules.prepare_plan(record, data)
+        return self.repository.create_plan(record_id, self.rules.PLAN_STATE, plan, actor.user_id)
+
+    def pay(self, actor: Actor, record_id: int, data: Dict[str, Any]) -> Dict[str, Any]:
+        actor = self._actor(actor)
+        self._ensure_known_role(actor)
+        if not self.rules.role_can_pay(actor.role):
+            raise PermissionDenied("角色无权登记缴款")
+        if not isinstance(data, dict):
+            raise ValidationError("data必须是对象")
+        plan = self.repository.get_plan(record_id)
+        if plan is None:
+            raise NotFound("分期计划不存在")
+        allocation = self.rules.apply_payment(plan, data.get("amount"))
+        return self.repository.apply_payment(record_id, allocation, actor.user_id)
+
+    def get_plan(self, actor: Actor, record_id: int) -> Dict[str, Any]:
+        actor = self._actor(actor)
+        self._ensure_known_role(actor)
+        plan = self.repository.get_plan(record_id)
+        if plan is None:
+            raise NotFound("分期计划不存在")
+        return plan
 
     def act(self, actor: Actor, record_id: int, expected_version: int, action: str, data: Dict[str, Any]) -> Dict[str, Any]:
         actor = self._actor(actor)
